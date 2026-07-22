@@ -335,9 +335,11 @@ Managing the following transformations of classical control signals:
     net::RegisterNet
     """the vertex index of where the protocol is located"""
     node::Int
+    """whether to use AIMD congestion control (true) or fixed window (false)"""
+    use_aimd::Bool = true
 end
 
-EndNodeController(net::RegisterNet, node::Int) = EndNodeController(get_time_tracker(net), net, node)
+EndNodeController(net::RegisterNet, node::Int; use_aimd::Bool=true) = EndNodeController(get_time_tracker(net), net, node, use_aimd)
 
 """
 $TYPEDEF
@@ -538,8 +540,9 @@ LinkController(net::RegisterNet, nodeA::Int, nodeB::Int) = LinkController(get_ti
         end
 
         for uuid in current_flows
+            effective_window = prot.use_aimd ? floor(Int, window[uuid]) : 3
             while qdatagrams_in_flight[uuid] < effective_window &&
-                qdatagrams_in_flight[uuid] < pairs_left_to_fulfill[uuid]
+                  qdatagrams_in_flight[uuid] < pairs_left_to_fulfill[uuid]
             qdatagrams_in_flight[uuid] += 1
             dst         = destination[uuid]
             seq_num     = qdatagrams_sent[uuid] += 1
@@ -578,7 +581,6 @@ end
                 workwasdone = true # this counts as work so the loop continues checking
                 t_current = avg_buffering_time(arrival_times, current_time)
                 pi_update!(pi_ctrl, t_current)
-                @info "[$(now(sim))] PI STATE | node=$(node) | p=$(round(pi_ctrl.p, digits=8)) | t_current=$(round(t_current*1000, digits=4))ms | expected_marks_per_100_datagrams=$(round(pi_ctrl.p * 100, digits=6))"
                 last_pi_update = current_time
 
                 @info "[$(current_time)] PI STATE | node=$(node) | p=$(round(pi_ctrl.p, digits=8)) | t_current=$(round(t_current*1000, digits=4))ms"
@@ -642,7 +644,7 @@ end
                 else
                     # Find the corresponding LinkLevelReplyAtHop message from the previous hop (when the current node was the destination node)
                     #Recommended Fix: Use W for the unknown empty memory slot
-                    llreply_at_destination = querydelete!(mb, LinkLevelReplyAtHop, flow_uuid, seq_num, W)
+                    llreply_at_destination = querydelete!(mb, LinkLevelReplyAtHop, flow_uuid, ❓, ❓)
                     @assert !isnothing(llreply_at_destination) "No LinkLevelReplyAtHop message found for flow $(flow_uuid), sequence $(seq_num) at node $(node)"
                     _, _, _, memory_slot_at_destination = llreply_at_destination.tag
                     swapcircuit = LocalEntanglementSwap()
@@ -666,13 +668,11 @@ end
 
 @resumable function _link_handle_request(sim, net, nodeA, nodeB, originator_node, destination_node, flow_uuid, seq_num, link_resource)
     @yield lock(link_resource)
-    regA_free = findall(isnothing, [net[nodeA][i] for i in 1:nsubsystems(net[nodeA])])
-    regB_free = findall(isnothing, [net[nodeB][i] for i in 1:nsubsystems(net[nodeB])])
     entangler = EntanglerProt(;
         sim, net,
         nodeA, nodeB,
         tag=nothing,
-        rounds=1, attempts=-1, success_prob=1.0, attempt_time=1.0 # TODO parameterize the link time and quality
+        rounds=1, attempts=-1, success_prob=1.0, attempt_time=0.01 # TODO parameterize the link time and quality
     )
     # TODO have a timeout on how long to wait for an entangler to complete
     proc = @process entangler()
@@ -699,9 +699,6 @@ end
         workwasdone = true
         while workwasdone
             workwasdone = false
-            
-            # add this right inside the LinkController loop, before the querydelete! calls
-            @debug "[$(now(sim))] LinkController polling | nodeA=$(nodeA) nodeB=$(nodeB)"
             
             llrequestA = querydelete!(mbA, LinkLevelRequest, ❓, ❓, nodeB)
             llrequest, originator_node, destination_node = if isnothing(llrequestA)
